@@ -10,6 +10,7 @@ Usage:
 """
 import os
 import io
+import sys
 import json
 import zipfile
 import numpy as np
@@ -18,8 +19,8 @@ import yaml
 from PIL import Image
 
 # ─── Configuration ───────────────────────────────────────────────────
-COMPRESSED_DIR = "results/standalone_compression/exr_jxl_quant_5_norm"
-OUTPUT_SOG = "results/compressed.sog"
+COMPRESSED_DIR = sys.argv[1] if len(sys.argv) > 1 else "results/standalone_compression/exr_jxl_quant_5_norm"
+OUTPUT_SOG = sys.argv[2] if len(sys.argv) > 2 else "results/compressed.sog"
 
 
 # ─── Codec Decoders (reuse SOGS codecs) ─────────────────────────────
@@ -352,12 +353,7 @@ def main():
     sog_size = os.path.getsize(OUTPUT_SOG)
     print(f"\nDone! Output: {OUTPUT_SOG} ({sog_size / 1e6:.1f} MB)")
 
-    # Also copy to Spark assets for easy loading
-    spark_dest = "/Users/leonhardthyssen/Desktop/code/spark/examples/assets/compressed.sog"
-    import shutil
-    shutil.copy2(OUTPUT_SOG, spark_dest)
-    print(f"Copied to: {spark_dest}")
-    print(f"\nLoad in Spark: http://localhost:8080/examples/viewer/?url=/examples/assets/compressed.sog")
+    print("Done!")
 
 
 if __name__ == "__main__":

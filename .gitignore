@@ -9,3 +9,4 @@ screenshots
 RAW PLY FILES/point_cloud.ply
 .venv*/
 results/
+*.ply

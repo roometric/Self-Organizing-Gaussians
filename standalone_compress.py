@@ -30,8 +30,8 @@ codecs = {
 }
 
 # ─── Configuration ───────────────────────────────────────────────────
-PLY_PATH = "RAW PLY FILES/point_cloud.ply"
-OUTPUT_DIR = "results/standalone_compression"
+PLY_PATH = sys.argv[1] if len(sys.argv) > 1 else "RAW PLY FILES/point_cloud.ply"
+OUTPUT_DIR = sys.argv[2] if len(sys.argv) > 2 else "results/standalone_compression"
 COMPRESSION_CONFIG = "config/compression/umbrella_sh.yaml"
 SH_DEGREE = 3
 DEVICE = "cpu"  # "cpu" for Mac, "cuda" for GPU machines
