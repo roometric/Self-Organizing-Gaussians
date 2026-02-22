@@ -12,31 +12,31 @@ experiments:
         method: "jpeg-xl"
         normalize: true
         params:
-          level: 90
+          level: 101
       - name: "_features_rest"
         method: "jpeg-xl"
         normalize: true
-        quantize: 5
+        quantize: 8
         params:
           level: 101
       - name: "_scaling"
         method: "exr"
         normalize: false
         contract: false
-        quantize: 6
+        quantize: 8
         params:
           compression: "none"
       - name: "_rotation"
         method: "exr"
         normalize: false
-        quantize: 6
+        quantize: 8
         params:
           compression: "zip"
       - name: "_opacity"
         method: "exr"
         normalize: true
         contract: false
-        quantize: 5
+        quantize: 8
         params:
           compression: "none"
 
