@@ -107,9 +107,9 @@ def encode_positions(xyz, grid_sidelen):
 
 def encode_scales(scaling, grid_sidelen):
     """
-    Encode log-space scales for Spark SOGS V1.
-    Spark decodes: lookup[i] = exp(min + (max - min) * (i / 255))
-    So we store the raw log-space scale values, normalized to uint8.
+    Encode log-space scales as uint8 RGBA WebP.
+    Viewer decodes: value = min + (max - min) * (byte / 255)
+    Then applies: scale = exp(value)
     """
     mins = scaling.min(axis=0).tolist()
     maxs = scaling.max(axis=0).tolist()
@@ -124,8 +124,8 @@ def encode_scales(scaling, grid_sidelen):
     rgba = np.zeros((N, 4), dtype=np.uint8)
     rgba[:, :3] = quant_8
     rgba[:, 3] = 255
-    img = rgba.reshape(grid_sidelen, grid_sidelen, 4)
 
+    img = rgba.reshape(grid_sidelen, grid_sidelen, 4)
     return img, mins, maxs
 
 
@@ -199,15 +199,13 @@ def encode_quaternions(quats_wxyz, grid_sidelen):
 
 def encode_sh0_opacity(features_dc, opacity, grid_sidelen):
     """
-    Encode DC color (SH band 0) + opacity into a single RGBA image.
+    Encode DC color (SH band 0) + opacity as uint8 RGBA WebP.
 
     features_dc: (N, 1, 3) — raw SH DC coefficients
     opacity:     (N, 1)    — raw logit-space opacity
 
-    Spark decodes (V1):
-      color = SH_C0 * lookup[byte] + 0.5    where lookup maps [0..255] to [min..max]
-      alpha = sigmoid(lookup[byte])
-    So we store the raw values, normalized to [0, 255].
+    Viewer decodes: value = min + (max - min) * (byte / 255)
+    Then applies: color = SH_C0 * value + 0.5, alpha = sigmoid(value)
     """
     dc = features_dc.reshape(-1, 3)  # (N, 3)
     op = opacity.reshape(-1)  # (N,)
@@ -226,6 +224,78 @@ def encode_sh0_opacity(features_dc, opacity, grid_sidelen):
     img = quant_8.reshape(grid_sidelen, grid_sidelen, 4)
 
     return img, mins, maxs
+
+
+def encode_shN(features_rest, grid_sidelen, K=4096):
+    """
+    Encode higher-order SH coefficients using vector quantization (K-means)
+    in the format expected by Spark's shN V1 decoder.
+
+    features_rest: (sidelen, sidelen, num_coeffs*3) — e.g. 45 for SH degree 3
+    K: number of centroids for vector quantization
+
+    Spark's shN decoder expects:
+      - File 0 (centroids): image where each centroid = 15 consecutive pixels x RGB
+        64 centroids per row, so width = 64 * 15 = 960
+      - File 1 (labels): sidelen x sidelen image, R + G<<8 = 16-bit centroid label
+      - Scalar mins/maxs for global dequantization: value = mins + (maxs - mins) * (byte / 255)
+
+    Returns: centroids_img, labels_img, global_min (scalar), global_max (scalar)
+    """
+    from scipy.cluster.vq import kmeans2
+
+    flat = features_rest.reshape(-1, features_rest.shape[-1])  # (N, 45)
+    N = flat.shape[0]
+    num_channels = flat.shape[1]  # 45 = 15 coefficients x 3 RGB
+    num_coeffs = num_channels // 3  # 15
+
+    # Global min/max across all values
+    global_min = float(flat.min())
+    global_max = float(flat.max())
+
+    # Normalize to [0, 1] and quantize to uint8
+    rng = global_max - global_min
+    if rng == 0:
+        rng = 1.0
+    normalized = (flat - global_min) / rng
+    quantized = np.clip(np.round(normalized * 255), 0, 255).astype(np.float32)
+
+    # Run K-means
+    print(f"    Running K-means with K={K} on {N} vectors of dim {num_channels}...")
+    centroids, labels = kmeans2(quantized, K, minit='points', iter=20)
+    centroids = np.clip(np.round(centroids), 0, 255).astype(np.uint8)  # (K, 45)
+    actual_K = centroids.shape[0]
+    print(f"    K-means done. {actual_K} centroids.")
+
+    # Build centroids image
+    # Layout: 64 centroids per row, each centroid = 15 consecutive pixels (one per SH coeff)
+    # Each pixel's RGB = the 3 color values for that coefficient
+    centroids_per_row = 64
+    num_rows = int(np.ceil(actual_K / centroids_per_row))
+    img_width = centroids_per_row * num_coeffs  # 64 * 15 = 960
+
+    centroids_rgba = np.zeros((num_rows, img_width, 4), dtype=np.uint8)
+    centroids_rgba[:, :, 3] = 255  # alpha
+
+    for c_idx in range(actual_K):
+        row = c_idx // centroids_per_row
+        col_start = (c_idx % centroids_per_row) * num_coeffs
+        centroid = centroids[c_idx]  # (45,)
+        for k in range(num_coeffs):
+            px_col = col_start + k
+            centroids_rgba[row, px_col, 0] = centroid[k * 3 + 0]  # R
+            centroids_rgba[row, px_col, 1] = centroid[k * 3 + 1]  # G
+            centroids_rgba[row, px_col, 2] = centroid[k * 3 + 2]  # B
+
+    # Build labels image (sidelen x sidelen RGBA)
+    labels_rgba = np.zeros((N, 4), dtype=np.uint8)
+    labels_rgba[:, 0] = (labels & 0xFF).astype(np.uint8)         # R = low byte
+    labels_rgba[:, 1] = ((labels >> 8) & 0xFF).astype(np.uint8)  # G = high byte
+    labels_rgba[:, 2] = 0
+    labels_rgba[:, 3] = 255
+    labels_img = labels_rgba.reshape(grid_sidelen, grid_sidelen, 4)
+
+    return centroids_rgba, labels_img, global_min, global_max
 
 
 def save_webp_lossless(img_array, buf):
@@ -298,6 +368,26 @@ def main():
     print("  Encoding SH0 + opacity...")
     sh0_img, sh0_mins, sh0_maxs = encode_sh0_opacity(features_dc, opacity, grid_sidelen)
 
+    # 5. Higher-order SH coefficients (vector-quantized shN)
+    shN_centroids_img = None
+    shN_labels_img = None
+    shN_meta = None
+    if '_features_rest' in attrs:
+        num_channels = attrs['_features_rest'].shape[-1]  # e.g. 45
+        if num_channels > 0:
+            print(f"  Encoding shN ({num_channels} channels, VQ with K=4096)...")
+            shN_centroids_img, shN_labels_img, shN_min, shN_max = encode_shN(
+                attrs['_features_rest'], grid_sidelen, K=4096
+            )
+            shN_meta = {
+                "shape": [N, num_channels],
+                "dtype": "uint8",
+                "mins": shN_min,
+                "maxs": shN_max,
+                "quantization": 4096,
+                "files": ["shN_centroids.webp", "shN_labels.webp"]
+            }
+
     # Build meta.json (V1 format)
     meta = {
         "means": {
@@ -329,6 +419,9 @@ def main():
         }
     }
 
+    if shN_meta is not None:
+        meta["shN"] = shN_meta
+
     # Package into ZIP
     print("\nPackaging .sog file...")
     os.makedirs(os.path.dirname(OUTPUT_SOG) or ".", exist_ok=True)
@@ -349,6 +442,17 @@ def main():
             save_webp_lossless(img_array, buf)
             zf.writestr(name, buf.getvalue())
             print(f"  {name}: {len(buf.getvalue()) / 1024:.1f} KB")
+
+        # Write shN images (centroids + labels)
+        if shN_centroids_img is not None:
+            for name, img_array in [
+                ("shN_centroids.webp", shN_centroids_img),
+                ("shN_labels.webp", shN_labels_img),
+            ]:
+                buf = io.BytesIO()
+                save_webp_lossless(img_array, buf)
+                zf.writestr(name, buf.getvalue())
+                print(f"  {name}: {len(buf.getvalue()) / 1024:.1f} KB")
 
     sog_size = os.path.getsize(OUTPUT_SOG)
     print(f"\nDone! Output: {OUTPUT_SOG} ({sog_size / 1e6:.1f} MB)")
